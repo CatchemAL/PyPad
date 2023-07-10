@@ -7,6 +7,7 @@ from chess.engine import Limit, PovScore, SimpleEngine
 from tqdm import trange
 
 from ..states.chess import ChessState
+from ..states.chess_enums import KeyGames
 from .alpha_zero_parameters import AZTrainingParameters
 from .network import NeuralNetwork, TrainingData
 
@@ -42,7 +43,19 @@ class SupervisedTrainer:
 
         training_set: list[TrainingData] = []
         while len(training_set) < min_num_points:
-            state: ChessState = self.neural_net.game.initial_state()
+            seeded_game = random.random()
+            if seeded_game < 0.2:
+                init = KeyGames.FRIED_LIVER_ATTACK.value[:9]
+            elif seeded_game < 0.4:
+                init = KeyGames.ACCELERATED_DRAGON.value
+            elif seeded_game < 0.6:
+                init = KeyGames.LONDON_SYSTEM.value
+            elif seeded_game < 0.8:
+                init = KeyGames.SICILIAN_OPENING.value
+            else:
+                init = None
+
+            state: ChessState = self.neural_net.game.initial_state(init)
             status = state.status()
             while status.is_in_progress:
                 training_data, top_moves = self.to_data_point(state, discount_factor)
@@ -54,6 +67,7 @@ class SupervisedTrainer:
                     move = legal_moves[idx]
                     state.set_move(move)
                 else:
+                    top_moves = top_moves[:3]
                     idx = np.random.choice(len(top_moves))
                     top_move = top_moves[idx]
                     state.set_move(top_move)
@@ -85,7 +99,7 @@ class SupervisedTrainer:
     ) -> tuple[TrainingData, list[Move]]:
         encoded_state = state.to_feature()
 
-        time_limit = Limit(time=0.01)
+        time_limit = Limit(time=0.02)
         infos = self.engine.analyse(state.board, time_limit, multipv=5)
 
         top_moves = [info["pv"][0] for info in infos]
