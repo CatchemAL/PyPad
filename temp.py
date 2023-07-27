@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from math import sqrt
+from math import sqrt, exp
 from typing import Protocol, Sequence
 
 import numpy as np
@@ -10,46 +10,50 @@ import torch.nn as nn
 import torch.nn.functional as F
 from matplotlib import pyplot as plt
 from scipy.stats import norm
+from torch.distributions.normal import Normal
 
 
 def gbm(S0, r, sigma, t, n_path):
     drift = r * t
-    time_steps = np.diff(t, prepend=0)
-    normals = np.random.standard_normal((n_path, num_steps + 1))
-    normals = np.vstack([normals, -normals])
-    vol = sigma * np.sqrt(time_steps) * normals.cumsum(axis=1)
+    time_steps = torch.diff(t, prepend=torch.tensor([0]))
+    normals = torch.randn((n_path, num_steps + 1))
+    normals = torch.cat([normals, -normals], dim=0)
+    vol = sigma * torch.sqrt(time_steps) * normals.cumsum(axis=1)
     exponent = drift + vol
-    paths = S0 * np.exp(exponent)
+    paths = S0 * torch.exp(exponent)
     return paths
 
 
 def _d1(S, K, r, sigma, t, T):
     t2m = T - t
-    numerator = np.log(S / K) + (r + 0.5 * sigma**2) * t2m
-    denominator = sigma * np.sqrt(t2m)
-    with np.errstate(divide="ignore"):
-        return numerator / denominator
+    numerator = (S / K).log() + (r + 0.5 * sigma**2) * t2m
+    denominator = sigma * torch.sqrt(t2m)
+    return numerator / denominator
 
 
 def _d2(d1, sigma, t, T):
     t2m = T - t
-    return d1 - sigma * np.sqrt(t2m)
+    return d1 - sigma * torch.sqrt(t2m)
 
 
 def call_price(S, K, r, t, T, d1, d2):
-    return S * norm.cdf(d1) - K * np.exp(-r * (T - t)) * norm.cdf(d2)
+    normal = Normal(0, 1)
+    return S * normal.cdf(d1) - K * torch.exp(-r * (T - t)) * normal.cdf(d2)
 
 
 def put_price(S, K, r, t, T, d1, d2):
-    return -S * norm.cdf(-d1) + K * np.exp(-r * (T - t)) * norm.cdf(-d2)
+    normal = Normal(0, 1)
+    return -S * normal.cdf(-d1) + K * torch.exp(-r * (T - t)) * normal.cdf(-d2)
 
 
 def call_delta(d1):
-    return norm.cdf(d1)
+    normal = Normal(0, 1)
+    return normal.cdf(d1)
 
 
 def put_delta(d1):
-    return norm.cdf(d1) - 1
+    normal = Normal(0, 1)
+    return normal.cdf(d1) - 1
 
 
 class Stock:
@@ -244,7 +248,7 @@ if __name__ == "__main__":
     r = 0.04
     n_path = 10_000
 
-    t = np.linspace(0, T, num_steps + 1)
+    t = torch.linspace(0, T, num_steps + 1)
 
     if True:
         S = gbm(S0, r, sigma, t, n_path)
@@ -260,30 +264,31 @@ if __name__ == "__main__":
 
         # Method 1
         # Cost of replication is the sum of each transaction plus the final payout
-        discount_factors = np.exp(-r * t)
-        txns = S * np.diff(delta, axis=1, prepend=0, append=0)
-        call_payoff = np.maximum(S[:, -1] - K, 0)
+        discount_factors = torch.exp(-r * t)
+        zeros = torch.zeros_like(delta[:, :1])
+        txns = S * delta.diff(axis=1, prepend=zeros, append=zeros)
+        call_payoff = torch.relu(S[:, -1] - K)
         txns[:, -1] += call_payoff
         disounted_txns = discount_factors * txns
         costs = disounted_txns.sum(axis=1)
-        print(f"Black-Scholes call price via replication = {np.mean(costs)}")
+        print(f"Black-Scholes call price via replication = {costs.mean()}")
 
-        txns = S * np.diff(delta - 1, axis=1, prepend=0, append=0)
-        put_payoff = np.maximum(K - S[:, -1], 0)
+        txns = S * (delta - 1).diff(axis=1, prepend=zeros, append=zeros)
+        put_payoff = torch.relu(K - S[:, -1])
         txns[:, -1] += put_payoff
         disounted_txns = discount_factors * txns
         costs = disounted_txns.sum(axis=1)
-        print(f"Black-Scholes put  price via replication = {np.mean(costs)}")
+        print(f"Black-Scholes put  price via replication = {costs.mean()}")
 
         # Method 2
         # Cost of replication is the final payout less any gains from stock growth
-        discounted_profits = np.diff(discount_factors * S, axis=1) * delta
-        profits = np.exp(-r * T) * call_payoff - np.sum(discounted_profits, axis=1)
-        print(f"Black-Scholes call price via replication = {np.mean(profits)}")
+        discounted_profits = torch.diff(discount_factors * S, axis=1) * delta
+        profits = exp(-r * T) * call_payoff - discounted_profits.sum(axis=1)
+        print(f"Black-Scholes call price via replication = {profits.mean()}")
 
-        discounted_profits = np.diff(discount_factors * S, axis=1) * (delta - 1)
-        profits = np.exp(-r * T) * put_payoff - np.sum(discounted_profits, axis=1)
-        print(f"Black-Scholes put  price via replication = {np.mean(profits)}")
+        discounted_profits = torch.diff(discount_factors * S, axis=1) * (delta - 1)
+        profits = exp(-r * T) * put_payoff - discounted_profits.sum(axis=1)
+        print(f"Black-Scholes put  price via replication = {profits.mean()}")
 
         """
         Method equivalence:
