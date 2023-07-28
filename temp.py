@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from math import sqrt, exp
+from math import exp, sqrt
 from typing import Protocol, Sequence
 
 import numpy as np
@@ -77,15 +77,15 @@ class Stock:
 
     def simulate(self, num_sims: int) -> None:
         drift = self.mu * self.time_steps
-        time_increments = np.diff(self.time_steps, prepend=0)
-        normals = np.random.standard_normal((num_sims // 2, len(self.time_steps)))
-        normals = np.vstack([normals, -normals])
-        vol = self.sigma * np.sqrt(time_increments) * normals.cumsum(axis=1)
+        time_increments = torch.diff(t, prepend=torch.tensor([0]))
+        normals = torch.randn((num_sims // 2, num_steps + 1))
+        normals = torch.cat([normals, -normals], dim=0)
+        vol = self.sigma * torch.sqrt(time_increments) * normals.cumsum(axis=1)
         exponent = drift + vol
-        self.prices = self.S0 * np.exp(exponent)
+        self.prices = self.S0 * torch.exp(exponent)
 
     def discount_factors(self) -> None:
-        discount_factors = np.exp(-self.r * self.time_steps)
+        discount_factors = torch.exp(-self.r * self.time_steps)
         return discount_factors
 
     def prices_at(self, t: float):
@@ -102,8 +102,8 @@ class EuropeanOption:
     def payout(self):
         S = self.stock.prices_at(self.maturity)
         if self.is_call:
-            return np.maximum(S - self.strike, 0)
-        return np.maximum(self.strike - S, 0)
+            return torch.relu(S - self.strike)
+        return torch.relu(self.strike - S)
 
 
 class HedgingStrategy(Protocol):
@@ -137,11 +137,10 @@ class BlackScholesHedgingStrategy:
 
         stock = self.option.stock
         S = stock.prices
-        r = stock.r
         K = self.option.strike
-        d = BlackScholesHedgingStrategy.d1(
-            S, K, stock.r, stock.sigma, stock.time_steps, self.option.maturity
-        )
+        r = stock.r
+        sigma = stock.sigma
+        d = BlackScholesHedgingStrategy.d1(S, K, r, sigma, stock.time_steps, self.option.maturity)
 
         if self.option.is_call:
             return BlackScholesHedgingStrategy.call_delta(d)
@@ -151,47 +150,48 @@ class BlackScholesHedgingStrategy:
     @staticmethod
     def d1(S, K, r, sigma, t, T):
         t2m = T - t
-        numerator = np.log(S / K) + (r + 0.5 * sigma**2) * t2m
-        denominator = sigma * np.sqrt(t2m)
-
-        with np.errstate(divide="ignore"):
-            return numerator / denominator
+        numerator = (S / K).log() + (r + 0.5 * sigma**2) * t2m
+        denominator = sigma * torch.sqrt(t2m)
+        return numerator / denominator
 
     @staticmethod
     def d2(d1, sigma, t, T):
         t2m = T - t
-        return d1 - sigma * np.sqrt(t2m)
+        return d1 - sigma * torch.sqrt(t2m)
 
     @staticmethod
     def call_price(S, K, r, t, T, d1, d2):
-        return S * norm.cdf(d1) - K * np.exp(-r * (T - t)) * norm.cdf(d2)
+        normal = Normal(0, 1)
+        return S * normal.cdf(d1) - K * torch.exp(-r * (T - t)) * normal.cdf(d2)
 
     @staticmethod
     def put_price(S, K, r, t, T, d1, d2):
-        return -S * norm.cdf(-d1) + K * np.exp(-r * (T - t)) * norm.cdf(-d2)
+        normal = Normal(0, 1)
+        return -S * normal.cdf(-d1) + K * torch.exp(-r * (T - t)) * normal.cdf(-d2)
 
     @staticmethod
     def call_delta(d1):
-        return norm.cdf(d1)
+        normal = Normal(0, 1)
+        return normal.cdf(d1)
 
     @staticmethod
     def put_delta(d1):
-        return norm.cdf(d1) - 1
+        normal = Normal(0, 1)
+        return normal.cdf(d1) - 1
 
 
 class Pricer:
     def price(self, hedging_strategy: HedgingStrategy) -> float:
         S = hedging_strategy.stock.prices
         discount_factors = hedging_strategy.stock.discount_factors()
+        change_in_prices = torch.diff(discount_factors * S, axis=1)
+
         delta = hedging_strategy.get_hedge_ratio()[:, :-1]
-        txns = S * np.diff(delta, axis=1, prepend=0, append=0)
+        discounted_profits = change_in_prices * delta
 
         payoff = hedging_strategy.option.payout()
-        txns[:, -1] += payoff
-        disounted_txns = discount_factors * txns
-        costs = disounted_txns.sum(axis=1)
-
-        return np.mean(costs)
+        cost_of_hedging = exp(-r * T) * payoff - discounted_profits.sum(axis=1)
+        return cost_of_hedging.mean()
 
 
 class MLPHedgingStrategy(nn.Module):
@@ -235,7 +235,7 @@ class MLPHedgingStrategy(nn.Module):
 
     def get_hedge_ratio(self, time_step_idx: int | None = None):
         example_input = torch.rand(10000, 101, num_inputs)  # Random example input data
-        return self(example_input).detach().numpy().squeeze(-1)
+        return self(example_input).squeeze(-1)
 
 
 if __name__ == "__main__":
@@ -257,12 +257,12 @@ if __name__ == "__main__":
         c = call_price(S, K, r, t, T, d1, d2)
         p = put_price(S, K, r, t, T, d1, d2)
 
-        print(f"Call={c[0, 0]}")
-        print(f"Put={p[0, 0]}")
+        print(f"Theoretical Call Price={c[0, 0]}")
+        print(f"Theoretical Put  Price={p[0, 0]}\n")
 
         delta = call_delta(d1)[:, :-1]
 
-        # Method 1
+        # Method 1 (Most intuitive to me...)
         # Cost of replication is the sum of each transaction plus the final payout
         discount_factors = torch.exp(-r * t)
         zeros = torch.zeros_like(delta[:, :1])
@@ -270,25 +270,25 @@ if __name__ == "__main__":
         call_payoff = torch.relu(S[:, -1] - K)
         txns[:, -1] += call_payoff
         disounted_txns = discount_factors * txns
-        costs = disounted_txns.sum(axis=1)
-        print(f"Black-Scholes call price via replication = {costs.mean()}")
+        cost_of_hedging = disounted_txns.sum(axis=1)
+        print(f"Black-Scholes call price via replication = {cost_of_hedging.mean()}")
 
         txns = S * (delta - 1).diff(axis=1, prepend=zeros, append=zeros)
         put_payoff = torch.relu(K - S[:, -1])
         txns[:, -1] += put_payoff
         disounted_txns = discount_factors * txns
-        costs = disounted_txns.sum(axis=1)
-        print(f"Black-Scholes put  price via replication = {costs.mean()}")
+        cost_of_hedging = disounted_txns.sum(axis=1)
+        print(f"Black-Scholes put  price via replication = {cost_of_hedging.mean()}")
 
         # Method 2
         # Cost of replication is the final payout less any gains from stock growth
         discounted_profits = torch.diff(discount_factors * S, axis=1) * delta
-        profits = exp(-r * T) * call_payoff - discounted_profits.sum(axis=1)
-        print(f"Black-Scholes call price via replication = {profits.mean()}")
+        cost_of_hedging = exp(-r * T) * call_payoff - discounted_profits.sum(axis=1)
+        print(f"Black-Scholes call price via replication = {cost_of_hedging.mean()}")
 
         discounted_profits = torch.diff(discount_factors * S, axis=1) * (delta - 1)
-        profits = exp(-r * T) * put_payoff - discounted_profits.sum(axis=1)
-        print(f"Black-Scholes put  price via replication = {profits.mean()}")
+        cost_of_hedging = exp(-r * T) * put_payoff - discounted_profits.sum(axis=1)
+        print(f"Black-Scholes put  price via replication = {cost_of_hedging.mean()}")
 
         """
         Method equivalence:
@@ -303,23 +303,28 @@ if __name__ == "__main__":
     bs_strategy = BlackScholesHedgingStrategy(call_option)
 
     pricer = Pricer()
-    pricer.price(bs_strategy)
-
-    # Example input data
-    num_inputs = 4
-    batch_size = 5
-    example_input = torch.rand(batch_size, 2, num_inputs)  # Random example input data
+    bs_call_price = pricer.price(bs_strategy)
+    print(f"Black-Scholes call price via replication = {bs_call_price}")
 
     # Create an instance of the MLPHedgingStrategy
+    num_inputs = 4
+    num_hidden_layers = 4
+    num_features = 32
+    num_outputs = 1
     mlp_strategy = MLPHedgingStrategy(
         option=call_option,
         num_inputs=num_inputs,
-        num_hidden_layers=4,
-        num_features=32,
-        num_outputs=1,
+        num_hidden_layers=num_hidden_layers,
+        num_features=num_features,
+        num_outputs=num_outputs,
     )
 
-    mlp_strategy(example_input).squeeze(-1).detach().numpy().shape
+    # Check setup is as expected
+    example_input = torch.rand(1000, 10, num_inputs)  # Random example input data
+    output = mlp_strategy(example_input).squeeze(-1)
+    print(f"Simple test returns output of shape {output.shape}")
 
     pricer = Pricer()
     pricer.price(mlp_strategy)
+    mlp_call_price = pricer.price(bs_strategy)
+    print(f"MLP call price via replication = {mlp_call_price}")
