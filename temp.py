@@ -363,5 +363,7 @@ if __name__ == "__main__":
     mlp_call_price = pricer.price(mlp_strategy)
     print(f"MLP call price via replication = {mlp_call_price}")
 
-
+    print('Training...')
     pricer.fit(mlp_strategy)
+    mlp_call_price = pricer.price(mlp_strategy)
+    print(f"MLP call price via replication = {mlp_call_price}")
