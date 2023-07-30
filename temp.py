@@ -1,14 +1,14 @@
+import math
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adam
 from matplotlib import pyplot as plt
 from torch.distributions.normal import Normal
+from torch.optim import Adam
 
 
 def gbm(S0, r, sigma, t, n_path):
@@ -191,9 +191,7 @@ class Pricer:
         cost_of_hedging = math.exp(-r * T) * payoff - discounted_profits.sum(axis=1)
         return cost_of_hedging.mean()
 
-
     def fit(self, hedging_strategy: HedgingStrategy) -> float:
-
         params = hedging_strategy.parameters()
         optimizer = Adam(params=params)
 
@@ -213,13 +211,14 @@ class Pricer:
             optimizer.zero_grad()
             risk_measure.backward()
             optimizer.step()
-            print(f'{epoch}: {risk_measure}')
+            print(f"{epoch}: {risk_measure}")
 
         return cost_of_hedging.mean()
 
-    def entropic_risk_measure(self, x, a:float=1):
-        n = len(x)
-        return (torch.logsumexp(-a * x, dim=0) - math.log(n)) / a
+    def entropic_risk_measure(self, profit, a: float = 1):
+        n = len(profit)
+        return (torch.logsumexp(-a * profit, dim=0) - math.log(n)) / a
+
 
 class MLPHedgingStrategy(nn.Module):
     def __init__(
@@ -363,7 +362,7 @@ if __name__ == "__main__":
     mlp_call_price = pricer.price(mlp_strategy)
     print(f"MLP call price via replication = {mlp_call_price}")
 
-    print('Training...')
+    print("Training...")
     pricer.fit(mlp_strategy)
     mlp_call_price = pricer.price(mlp_strategy)
     print(f"MLP call price via replication = {mlp_call_price}")
