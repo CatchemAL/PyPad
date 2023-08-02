@@ -1,16 +1,14 @@
+import math
 from dataclasses import dataclass
-from math import exp, sqrt
 from typing import Protocol, Sequence
 
 import numpy as np
-import pandas as pd
-import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from matplotlib import pyplot as plt
-from scipy.stats import norm
 from torch.distributions.normal import Normal
+from torch.optim import Adam
 
 
 def gbm(S0, r, sigma, t, n_path):
@@ -190,8 +188,36 @@ class Pricer:
         discounted_profits = change_in_prices * delta
 
         payoff = hedging_strategy.option.payout()
-        cost_of_hedging = exp(-r * T) * payoff - discounted_profits.sum(axis=1)
+        cost_of_hedging = math.exp(-r * T) * payoff - discounted_profits.sum(axis=1)
         return cost_of_hedging.mean()
+
+    def fit(self, hedging_strategy: HedgingStrategy) -> float:
+        params = hedging_strategy.parameters()
+        optimizer = Adam(params=params)
+
+        hedging_strategy.train()
+        for epoch in range(100):
+            S = hedging_strategy.stock.prices
+            discount_factors = hedging_strategy.stock.discount_factors()
+            change_in_prices = torch.diff(discount_factors * S, axis=1)
+
+            delta = hedging_strategy.get_hedge_ratio()[:, :-1]
+            discounted_profits = change_in_prices * delta
+
+            payoff = hedging_strategy.option.payout()
+            cost_of_hedging = math.exp(-r * T) * payoff - discounted_profits.sum(axis=1)
+            pnl = -cost_of_hedging
+            risk_measure = self.entropic_risk_measure(pnl)
+            optimizer.zero_grad()
+            risk_measure.backward()
+            optimizer.step()
+            print(f"{epoch}: {risk_measure}")
+
+        return cost_of_hedging.mean()
+
+    def entropic_risk_measure(self, profit, a: float = 1):
+        n = len(profit)
+        return (torch.logsumexp(-a * profit, dim=0) - math.log(n)) / a
 
 
 class MLPHedgingStrategy(nn.Module):
@@ -234,8 +260,16 @@ class MLPHedgingStrategy(nn.Module):
         return self.output_layer(x)
 
     def get_hedge_ratio(self, time_step_idx: int | None = None):
-        example_input = torch.rand(10000, 101, num_inputs)  # Random example input data
-        return self(example_input).squeeze(-1)
+        S = self.stock.prices
+        K = self.option.strike
+        T = self.option.maturity
+        t = self.stock.time_steps
+        log_moneyness = torch.log(S / K).unsqueeze(-1)
+        time_to_mat = (T - t).expand(S.shape[0], -1).unsqueeze(-1)
+        rfr = (torch.zeros_like(S) + stock.r).unsqueeze(-1)
+        vol = (torch.zeros_like(S) + stock.sigma).unsqueeze(-1)
+        input = torch.cat([log_moneyness, time_to_mat, rfr, vol], dim=-1)
+        return self(input).squeeze(-1)
 
 
 if __name__ == "__main__":
@@ -283,11 +317,11 @@ if __name__ == "__main__":
         # Method 2
         # Cost of replication is the final payout less any gains from stock growth
         discounted_profits = torch.diff(discount_factors * S, axis=1) * delta
-        cost_of_hedging = exp(-r * T) * call_payoff - discounted_profits.sum(axis=1)
+        cost_of_hedging = math.exp(-r * T) * call_payoff - discounted_profits.sum(axis=1)
         print(f"Black-Scholes call price via replication = {cost_of_hedging.mean()}")
 
         discounted_profits = torch.diff(discount_factors * S, axis=1) * (delta - 1)
-        cost_of_hedging = exp(-r * T) * put_payoff - discounted_profits.sum(axis=1)
+        cost_of_hedging = math.exp(-r * T) * put_payoff - discounted_profits.sum(axis=1)
         print(f"Black-Scholes put  price via replication = {cost_of_hedging.mean()}")
 
         """
@@ -320,11 +354,15 @@ if __name__ == "__main__":
     )
 
     # Check setup is as expected
-    example_input = torch.rand(1000, 10, num_inputs)  # Random example input data
+    example_input = torch.rand(n_path, len(t), num_inputs)  # Random example input data
     output = mlp_strategy(example_input).squeeze(-1)
     print(f"Simple test returns output of shape {output.shape}")
 
     pricer = Pricer()
-    pricer.price(mlp_strategy)
-    mlp_call_price = pricer.price(bs_strategy)
+    mlp_call_price = pricer.price(mlp_strategy)
+    print(f"MLP call price via replication = {mlp_call_price}")
+
+    print("Training...")
+    pricer.fit(mlp_strategy)
+    mlp_call_price = pricer.price(mlp_strategy)
     print(f"MLP call price via replication = {mlp_call_price}")
