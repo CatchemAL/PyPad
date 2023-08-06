@@ -272,7 +272,7 @@ class MLPHedgingStrategy(nn.Module):
         return self(input).squeeze(-1)
 
 
-if __name__ == "__main__":
+def run():
     S0 = 100
     K = 108
     T = 1
@@ -366,3 +366,7 @@ if __name__ == "__main__":
     pricer.fit(mlp_strategy)
     mlp_call_price = pricer.price(mlp_strategy)
     print(f"MLP call price via replication = {mlp_call_price}")
+
+
+if __name__ == "__main__":
+    run()
